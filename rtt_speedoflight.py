@@ -24,6 +24,15 @@ TARGETS = {
     "Mumbai":       {"url": "http://www.google.co.in",   "coords": (19.0760,   72.8777), "continent": "Asia"},
     "London":       {"url": "http://www.google.co.uk",   "coords": (51.5074,   -0.1278), "continent": "Europe"},
     "Singapore":    {"url": "http://www.google.com.sg",  "coords": (1.3521,   103.8198), "continent": "Asia"},
+    
+    "Sendai": {"url": "http://www.tohoku.ac.jp", "coords": (38.2682, 140.8694), "continent": "Asia", "org": "Tohoku University"},
+    "Seoul": {"url": "http://www.snu.ac.kr", "coords": (37.4602, 126.9522), "continent": "Asia", "org": "Seoul National University"},
+    "New Delhi": {"url": "http://www.iitd.ac.in", "coords": (28.5458, 77.1928), "continent": "Asia", "org": "IIT Delhi"},
+    "Santiago": {"url": "http://www.uchile.cl", "coords": (-33.4508, -70.6736), "continent": "S. America", "org": "Universidad de Chile"},
+    "Johannesburg": {"url": "http://www.wits.ac.za", "coords": (-26.1922, 28.0306), "continent": "Africa", "org": "University of the Witwatersrand"},
+    "Berlin": {"url": "http://www.fu-berlin.de", "coords": (52.4531, 13.2935), "continent": "Europe", "org": "Freie Universität Berlin"},
+    "Imperial London": {"url": "http://www.imperial.ac.uk", "coords": (51.4988, -0.1749), "continent": "Europe", "org": "Imperial College London"},
+    "Canberra": {"url": "http://www.anu.edu.au", "coords": (-35.2809, 149.1180), "continent": "Oceania", "org": "Australian National University"},
 }
 
 PROBES           = 15
@@ -69,15 +78,27 @@ def measure_rtt(url: str, probes: int = PROBES) -> dict:
     lost    = 0
 
     for _ in range(probes):
-        # TODO: send probe
+        try:
+            t0 = time.perf_counter()
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+            samples.append(elapsed_ms)
+        except Exception:
+            lost += 1
         time.sleep(0.2)
 
     if not samples:
         return {"min_ms": None, "mean_ms": None, "median_ms": None,
                 "loss_pct": 100.0, "samples": []}
 
-    # TODO: compute and return stats
-    return {}  # placeholder
+    arr = np.array(samples)
+    return {
+        "min_ms": float(np.min(arr)),
+        "mean_ms": float(np.mean(arr)),
+        "median_ms": float(np.median(arr)),
+        "loss_pct": (lost / probes) * 100.0,
+        "samples": samples,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -96,9 +117,14 @@ def great_circle_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float
     TODO: implement from scratch. Use math.radians() to convert degrees.
     Do NOT use geopy or any distance library.
     """
-    R = 6371
-    # TODO
-    return 0.0  # placeholder
+    R = 6371.0
+    phi1, lam1 = math.radians(lat1), math.radians(lon1)
+    phi2, lam2 = math.radians(lat2), math.radians(lon2)
+    dphi = phi2 - phi1
+    dlam = lam2 - lam1
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return R * c
 
 
 def get_my_location() -> tuple[float, float, str]:
@@ -127,8 +153,20 @@ def compute_inefficiency(results: dict, src_lat: float, src_lon: float) -> dict:
         4. Annotate results[city] in place.
     """
     for city, data in results.items():
-        # TODO
-        pass
+        lat2, lon2 = data["coords"]
+        d_km = great_circle_km(src_lat, src_lon, lat2, lon2)
+        theor_ms = (d_km / FIBER_SPEED_KM_S) * 2 * 1000.0
+        med = data.get("median_ms")
+        if med is None or theor_ms <= 0:
+            ratio = None
+            high = False
+        else:
+            ratio = med / theor_ms
+            high = ratio > 3.0
+        data["distance_km"] = d_km
+        data["theoretical_min_ms"] = theor_ms
+        data["inefficiency_ratio"] = ratio
+        data["high_inefficiency"] = high
     return results
 
 
@@ -166,14 +204,49 @@ def make_plots(results: dict):
 
     # ── Figure 1 ──────────────────────────────
     fig, ax = plt.subplots(figsize=(11, 6))
-    # TODO
+    x = np.arange(len(cities))
+    w = 0.35
+    medians = [valid[c]["median_ms"] for c in cities]
+    theor = [valid[c]["theoretical_min_ms"] for c in cities]
+    ax.bar(x - w / 2, medians, w, label="Measured median RTT (ms)")
+    ax.bar(x + w / 2, theor, w, label="Theoretical min RTT (ms)")
+    ax.set_xticks(x, cities, rotation=35, ha="right")
+    ax.set_ylabel("RTT (ms)")
+    ax.set_xlabel("City (sorted by distance)")
+    ax.set_title("Median RTT vs. theoretical fiber minimum")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(f"{FIGURES_DIR}/fig1_rtt_comparison.png", dpi=150, bbox_inches="tight")
     plt.close()
 
     # ── Figure 2 ──────────────────────────────
     fig, ax = plt.subplots(figsize=(10, 7))
-    # TODO
+    dists = np.array([valid[c]["distance_km"] for c in cities])
+    meds = np.array([valid[c]["median_ms"] for c in cities])
+    conts = [valid[c]["continent"] for c in cities]
+    colors = [CONTINENT_COLORS.get(ct, "#888888") for ct in conts]
+    ax.scatter(dists, meds, c=colors, s=70, edgecolors="black", linewidths=0.5, zorder=3)
+    for c in cities:
+        ax.annotate(
+            c,
+            (valid[c]["distance_km"], valid[c]["median_ms"]),
+            textcoords="offset points",
+            xytext=(4, 4),
+            fontsize=8,
+        )
+    d0, d1 = float(np.min(dists)), float(np.max(dists))
+    line_x = np.linspace(d0, d1, 200)
+    line_y = (line_x / FIBER_SPEED_KM_S) * 2 * 1000.0
+    ax.plot(line_x, line_y, "k--", linewidth=1.5, label="Theoretical minimum RTT")
+    ax.set_xlabel("Distance (km)")
+    ax.set_ylabel("Measured median RTT (ms)")
+    ax.set_title("Distance vs. RTT (colored by continent)")
+    ax.grid(alpha=0.3)
+    uniq = list(dict.fromkeys(conts))
+    leg_handles = [mpatches.Patch(color=CONTINENT_COLORS.get(ct, "#888888"), label=ct) for ct in uniq]
+    leg_handles.append(plt.Line2D([0], [0], color="k", linestyle="--", linewidth=1.5, label="Theoretical minimum RTT"))
+    ax.legend(handles=leg_handles, loc="upper left")
     plt.tight_layout()
     plt.savefig(f"{FIGURES_DIR}/fig2_distance_scatter.png", dpi=150, bbox_inches="tight")
     plt.close()
